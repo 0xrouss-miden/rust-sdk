@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.17.0-rc.2 (TBD)
+
+### Features
+
+* [FEATURE][cli] Added the `--ecdsa-public-key` flag to `new-wallet` and `new-account`. It creates the account with an ECDSA authentication component committing to an externally-held secp256k1 key (e.g. one generated on a Ledger device), accepting the SEC1 compressed or uncompressed encoding with a `0x` prefix. No secret key is generated or stored, so transactions must be signed by the external key holder (#TBD).
+
 ## 0.17.0.rc-1 (2026-09-17)
 
 ### Breaking Changes
