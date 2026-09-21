@@ -18,8 +18,8 @@ use crate::tests::network_transaction::deploy_network_counter_contract;
 
 /// A registered account can be created on chain.
 ///
-/// This is the flow the whole allowlist feature exists for: claim a code, register the account with
-/// it, and deploy.
+/// This is the flow the whole allowlist feature exists for: claim a code, add the account with it,
+/// and deploy.
 pub async fn test_allowlist_registered_account_can_deploy(
     client_config: ClientConfig,
 ) -> Result<()> {
@@ -27,10 +27,7 @@ pub async fn test_allowlist_registered_account_can_deploy(
     client.wait_for_node().await;
 
     let invitation_code = create_invitation_code().await?;
-    let account = insert_undeployed_wallet(&mut client).await?;
-
-    client
-        .register_account(&invitation_code, account.id())
+    let account = insert_undeployed_wallet(&mut client, Some(&invitation_code))
         .await
         .context("failed to register the account on the network allowlist")?;
 
@@ -58,7 +55,7 @@ pub async fn test_allowlist_unregistered_account_is_rejected(
     let mut client = client_config.into_client().await?;
     client.wait_for_node().await;
 
-    let account = insert_undeployed_wallet(&mut client).await?;
+    let account = insert_undeployed_wallet(&mut client, None).await?;
 
     let error = client
         .submit_new_transaction(account.id(), deploy_request()?)
@@ -106,13 +103,10 @@ pub async fn test_allowlist_is_enforced_per_batch_push(client_config: ClientConf
     client.wait_for_node().await;
 
     let invitation_code = create_invitation_code().await?;
-    let registered = insert_undeployed_wallet(&mut client).await?;
-    let unregistered = insert_undeployed_wallet(&mut client).await?;
-
-    client
-        .register_account(&invitation_code, registered.id())
+    let registered = insert_undeployed_wallet(&mut client, Some(&invitation_code))
         .await
         .context("failed to register the account")?;
+    let unregistered = insert_undeployed_wallet(&mut client, None).await?;
 
     // The funding notes are folded in before the batch borrows the client.
     let registered_request = client.fund_request(registered.id(), deploy_request()?);

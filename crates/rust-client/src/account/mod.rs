@@ -25,7 +25,7 @@
 //!     .build_with_schema_commitment()?;
 //!
 //! // Add the account to the client. The account already embeds its seed information.
-//! client.add_account(&account, false).await?;
+//! client.add_account(&account, false, None).await?;
 //! #   Ok(())
 //! # }
 //! ```
@@ -288,40 +288,10 @@ impl<AUTH> Client<AUTH> {
         &mut self,
         account: &Account,
         overwrite: bool,
+        invitation_code: Option<&str>,
     ) -> Result<(), ClientError> {
-        self.add_account_inner(account, ClientAccountType::Native, overwrite).await
-    }
-
-    // ACCOUNT REGISTRATION
-    // --------------------------------------------------------------------------------------------
-
-    /// Binds an invitation code to `account_id` on the network allowlist.
-    ///
-    /// An invitation code is single use and binds to one account. A repeated call with the same
-    /// code and the same account succeeds and changes nothing, so the caller can retry the call
-    /// after a lost response.
-    ///
-    /// # Errors
-    ///
-    /// - If the invitation code does not exist.
-    /// - If the invitation code is registered to a different account.
-    /// - If the account is already registered.
-    /// - If the invitation code is empty.
-    pub async fn register_account(
-        &self,
-        invitation_code: &str,
-        account_id: AccountId,
-    ) -> Result<(), ClientError> {
-        self.rpc_api.register_account(invitation_code, account_id).await?;
-
-        if let Err(err) = self.store.mark_account_allowlisted(account_id).await {
-            tracing::warn!(
-                "registered account {account_id} on the network allowlist but could not record it \
-                 locally, the next transaction asks the network again: {err}"
-            );
-        }
-
-        Ok(())
+        self.add_account_inner(account, ClientAccountType::Native, overwrite, invitation_code)
+            .await
     }
 
     /// Returns whether the network lets `account_id` be created on chain.
@@ -339,6 +309,7 @@ impl<AUTH> Client<AUTH> {
         account: &Account,
         client_account_type: ClientAccountType,
         overwrite: bool,
+        invitation_code: Option<&str>,
     ) -> Result<(), ClientError> {
         if account.is_new() {
             if account.seed().is_none() {
@@ -349,6 +320,20 @@ impl<AUTH> Client<AUTH> {
             if account.seed().is_some() {
                 tracing::warn!(
                     "Added an existing account and still provided a seed when it is not needed. It's possible that the account's file was incorrectly generated. The seed will be ignored."
+                );
+            }
+        }
+
+        if let Some(invitation_code) = invitation_code {
+            self.rpc_api.register_account(invitation_code, account.id()).await?;
+
+            // Recording the registration is only an optimization. A store failure leaves the
+            // account usable and costs one request the next time the allowlist is checked.
+            if let Err(err) = self.store.mark_account_allowlisted(account.id()).await {
+                tracing::warn!(
+                    "registered account {} on the network allowlist but could not record it \
+                     locally, the next transaction asks the network again: {err}",
+                    account.id()
                 );
             }
         }
@@ -430,7 +415,7 @@ impl<AUTH> Client<AUTH> {
     /// - There was an error sending the request to the network.
     pub async fn import_account_by_id(&mut self, account_id: AccountId) -> Result<(), ClientError> {
         let account = self.fetch_public_account(account_id).await?;
-        self.add_account_inner(&account, ClientAccountType::Native, true).await
+        self.add_account_inner(&account, ClientAccountType::Native, true, None).await
     }
 
     /// Starts watching an on-chain account ([`ClientAccountType::Watched`]).
@@ -453,7 +438,7 @@ impl<AUTH> Client<AUTH> {
         account_id: AccountId,
     ) -> Result<(), ClientError> {
         let account = self.fetch_public_account(account_id).await?;
-        self.add_account_inner(&account, ClientAccountType::Watched, true).await
+        self.add_account_inner(&account, ClientAccountType::Watched, true, None).await
     }
 
     /// Fetches a public [`Account`] from the network, returning a typed error when the account

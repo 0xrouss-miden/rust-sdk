@@ -324,20 +324,7 @@ impl From<&ClientError> for Option<ErrorHint> {
                 ),
                 docs_url: Some(TROUBLESHOOTING_DOC),
             }),
-            ClientError::RpcError(RpcError::ConnectionError(_)) => Some(ErrorHint {
-                message: "Could not reach the Miden node. Check that the node endpoint in your \
-                          configuration is correct and that the node is running.".to_string(),
-                docs_url: Some(TROUBLESHOOTING_DOC),
-            }),
-            ClientError::RpcError(RpcError::AcceptHeaderError(_)) => Some(ErrorHint {
-                message: "The node rejected the request due to a version mismatch. \
-                          Ensure your client version is compatible with the node version.".to_string(),
-                docs_url: Some(TROUBLESHOOTING_DOC),
-            }),
-            ClientError::RpcError(RpcError::RequestError {
-                endpoint_error: Some(EndpointError::RegisterAccount(inner)),
-                ..
-            }) => Some(register_account_hint(inner)),
+            ClientError::RpcError(inner) => rpc_hint(inner),
             ClientError::AddNewAccountWithoutSeed => Some(ErrorHint {
                 message: "New accounts require a seed to derive their initial state. \
                           Use `Client::new_account()` which generates the seed automatically, \
@@ -441,15 +428,13 @@ impl TransactionRequestError {
     }
 }
 
-/// Returns the hint for a registration that the node rejected. Hint for an account the network
-/// allowlist does not accept.
+/// Returns the hint for an account the network allowlist does not accept.
 fn account_not_allowlisted_hint(account_id: AccountId) -> ErrorHint {
     ErrorHint {
         message: format!(
             "The network only creates accounts that are on its allowlist, and account \
-             {account_id} is not on it. Register it with an invitation code through \
-             `account --register {account_id} --invitation-code <CODE>`, or create the account \
-             with `new-wallet --invitation-code <CODE>` from the start."
+             {account_id} is not on it. Create the account with \
+             `new-wallet --invitation-code <CODE>`, which registers it while it is created."
         ),
         docs_url: Some(TROUBLESHOOTING_DOC),
     }
@@ -472,6 +457,30 @@ fn batch_submission_outcome_unknown_hint(submission: &ProvenBatchSubmission) -> 
     }
 }
 
+/// Returns the hint for an error the node or the transport returned.
+fn rpc_hint(err: &RpcError) -> Option<ErrorHint> {
+    match err {
+        RpcError::ConnectionError(_) => Some(ErrorHint {
+            message: "Could not reach the Miden node. Check that the node endpoint in your \
+                      configuration is correct and that the node is running."
+                .to_string(),
+            docs_url: Some(TROUBLESHOOTING_DOC),
+        }),
+        RpcError::AcceptHeaderError(_) => Some(ErrorHint {
+            message: "The node rejected the request due to a version mismatch. \
+                      Ensure your client version is compatible with the node version."
+                .to_string(),
+            docs_url: Some(TROUBLESHOOTING_DOC),
+        }),
+        RpcError::RequestError {
+            endpoint_error: Some(EndpointError::RegisterAccount(inner)),
+            ..
+        } => Some(register_account_hint(inner)),
+        _ => None,
+    }
+}
+
+/// Returns the hint for a registration that the node rejected.
 fn register_account_hint(err: &RegisterAccountError) -> ErrorHint {
     let message = match err {
         RegisterAccountError::InvitationNotFound => {
