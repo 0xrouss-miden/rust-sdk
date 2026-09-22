@@ -52,15 +52,16 @@ use serde::Serialize;
 /// Genesis faucet file name. Carries the secret key so the operator/tests can mint TST.
 pub const GENESIS_FAUCET_FILE: &str = "tst_faucet.mac";
 
-/// Number of funder wallets a fee-charging genesis declares when no count is given.
-///
-/// A test process claims a wallet for as long as it runs, so this has to cover the processes
-/// running at once, which the test runner's thread cap bounds to a handful.
-pub const DEFAULT_NUM_FUNDER_WALLETS: u32 = 16;
+/// Name of the wallet the node's funding service pays out of. `miden-validator genesis` writes it
+/// to its accounts directory under this name plus a `.mac` suffix, which is the path the service is
+/// started with.
+pub const FUNDING_SERVICE_WALLET: &str = "funding_service";
 
-/// Balance, in base units of the native fee asset, each funder wallet holds at genesis. Covers the
-/// funder's own fees plus a handout to every account a single test creates.
-const FUNDER_WALLET_BALANCE: u64 = 1_000_000_000;
+/// Balance, in base units of the native fee asset, the funding service's wallet holds at genesis.
+///
+/// One account serves every test process, and the service does not refill itself, so this is sized
+/// to outlast a whole run by a wide margin rather than to match one test's spending.
+const FUNDING_SERVICE_WALLET_BALANCE: u64 = 100_000_000_000_000;
 
 /// Native fee faucet file name. Carries no secret key: the faucet is signed for by its operator,
 /// whose key is in [`FAUCET_OPERATOR_FILE`].
@@ -94,18 +95,15 @@ const GENESIS_ACCOUNT_FEE_BALANCE: u64 = 1_000_000_000;
 /// the node, so its ID is known before the remaining accounts are serialized. A vault entry can
 /// only reference a faucet whose ID already exists, which is what lets those accounts be seeded.
 ///
-/// `num_funder_wallets` declares that many `[[wallet]]` entries holding [`FUNDER_WALLET_BALANCE`].
-/// The node writes each to its accounts directory as `wallet_<index>.mac`, secret key included.
+/// A fee-charging genesis declares the [`FUNDING_SERVICE_WALLET`] entry, which the node writes to
+/// its accounts directory under that name with its secret key, and which the node's funding service
+/// pays out of.
 ///
 /// The agglayer genesis accounts (bridge admin, GER manager, bridge, and faucet) are emitted too,
 /// and integration tests load their `.mac` files via the `AGGLAYER_ACCOUNTS_DIR` env var. They are
 /// always present because the bridge and faucet are network accounts, which no client transaction
 /// can deploy, so a test cannot create them at runtime.
-pub fn write_genesis_config(
-    output_dir: &Path,
-    verification_base_fee: u32,
-    num_funder_wallets: u32,
-) -> Result<()> {
+pub fn write_genesis_config(output_dir: &Path, verification_base_fee: u32) -> Result<()> {
     std::fs::create_dir_all(output_dir).with_context(|| {
         format!("failed to create genesis output directory {}", output_dir.display())
     })?;
@@ -179,16 +177,7 @@ pub fn write_genesis_config(
         native_faucet: NATIVE_FAUCET_FILE.to_string(),
         fee_parameters: FeeParametersEntry { verification_base_fee },
         accounts: account_files.into_iter().map(|path| AccountEntry { path }).collect(),
-        wallets: (0..num_funder_wallets)
-            .map(|index| WalletEntry {
-                name: format!("wallet_{index}"),
-                account_type: "public".to_string(),
-                assets: vec![AssetEntry {
-                    amount: FUNDER_WALLET_BALANCE,
-                    symbol: NATIVE_FAUCET_SYMBOL.to_string(),
-                }],
-            })
-            .collect(),
+        wallets: funder_wallets(verification_base_fee),
     };
 
     let toml = toml::to_string(&config).context("failed to serialize genesis.toml")?;
@@ -196,6 +185,28 @@ pub fn write_genesis_config(
         .with_context(|| "failed to write genesis.toml")?;
 
     Ok(())
+}
+
+/// Builds the `[[wallet]]` entries a genesis declares, which the node creates and writes to its
+/// accounts directory with their secret keys.
+///
+/// A fee-free chain hands out nothing, so it declares none. A fee-charging one declares the single
+/// wallet the node's funding service pays out of.
+fn funder_wallets(verification_base_fee: u32) -> Vec<WalletEntry> {
+    if verification_base_fee == 0 {
+        return Vec::new();
+    }
+
+    vec![WalletEntry {
+        name: FUNDING_SERVICE_WALLET.to_string(),
+        // The funding service reads its account's vault and nonce back from the node, which holds
+        // the full state of a public account only.
+        account_type: "public".to_string(),
+        assets: vec![AssetEntry {
+            amount: FUNDING_SERVICE_WALLET_BALANCE,
+            symbol: NATIVE_FAUCET_SYMBOL.to_string(),
+        }],
+    }]
 }
 
 // GENESIS CONFIG

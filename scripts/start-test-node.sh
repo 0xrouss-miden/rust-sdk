@@ -12,7 +12,9 @@
 #
 # Env vars:
 #   MIDEN_VERIFICATION_BASE_FEE  genesis `verification_base_fee` (default 500; 0 disables fees)
-#   MIDEN_NUM_FUNDER_WALLETS     number of funder wallets a fee-charging genesis declares
+#
+# A fee-charging chain also starts the funding service, which is where the tests draw the native
+# asset from. They reach it at MIDEN_FUNDING_SERVICE_URL=http://127.0.0.1:50401.
 
 set -euo pipefail
 
@@ -39,6 +41,9 @@ VALIDATOR="127.0.0.1:50101"
 NTX="127.0.0.1:50301"
 PROVER_PORT=50051
 PROVER="127.0.0.1:$PROVER_PORT"
+# The funding service's HTTP API, which the tests reach through MIDEN_FUNDING_SERVICE_URL. Matches
+# the port the node's own compose file uses.
+FUNDING="127.0.0.1:50401"
 # How long a single network transaction proof may take. The prover enforces it server-side and the
 # ntx-builder waits that long for the response. Shared so the two cannot drift apart: if the
 # ntx-builder waited less, it would abandon a request the prover is still working on, re-queue the
@@ -51,7 +56,7 @@ NETWORK_TX_AUTH="${MIDEN_NETWORK_TX_AUTH:-miden-client-testing-ntx-secret}"
 # real chain. At 0 fees are never charged.
 VERIFICATION_BASE_FEE="${MIDEN_VERIFICATION_BASE_FEE:-500}"
 
-NODE_BINS=(miden-validator miden-node miden-ntx-builder miden-remote-prover)
+NODE_BINS=(miden-validator miden-node miden-ntx-builder miden-remote-prover miden-funding-service)
 
 # Resolve the pinned node source from Cargo.lock: a git pin takes precedence, otherwise use the
 # crates.io version locked for `miden-node-proto-build`.
@@ -132,9 +137,6 @@ rm -rf "$DATA"
 # Each component opens its SQLite DB directly under its data dir and does not create it.
 mkdir -p "$LOG_DIR" "$DATA/validator" "$DATA/node" "$DATA/ntx-builder"
 MIDEN_VERIFICATION_BASE_FEE="$VERIFICATION_BASE_FEE" "$GEN_GENESIS" "$DATA/genesis-config"
-# Cleared up front so a fee-free run cannot leave a previous run's funders behind, and re-exposed
-# below once `miden-validator genesis` has generated them.
-rm -rf "$ROOT/data/funders"
 mkdir -p "$ROOT/data"
 cp "$DATA/genesis-config/protocol-config.bin" "$ROOT/data/protocol-config.bin"
 cp "$DATA/genesis-config/tst_faucet.mac" "$ROOT/data/account.mac"
@@ -169,14 +171,6 @@ ENCRYPTION_KEY="9964dbb2590adeb415d3291b64a0a9991fbcac5adacb05ee17efee5296d081d7
 } >"$LOG_DIR/bootstrap.log" 2>&1
 NATIVE_FAUCET_ID="$(sed -n 's/^Native faucet account id: //p' "$LOG_DIR/bootstrap.log")"
 echo "==> native faucet $NATIVE_FAUCET_ID, operator wallet in $ROOT/data/faucet_operator.mac"
-
-# Expose the wallets the node generated from the genesis `[[wallet]]` entries under ./data/funders,
-# where the tests read them via MIDEN_FUNDER_ACCOUNTS_DIR. A fee-free genesis declares none.
-if compgen -G "$DATA/accounts/wallet_*.mac" >/dev/null; then
-    mkdir -p "$ROOT/data/funders"
-    cp "$DATA"/accounts/wallet_*.mac "$ROOT/data/funders/"
-    echo "==> exposed $(ls "$ROOT/data/funders" | wc -l | tr -d ' ') funder wallets in $ROOT/data/funders"
-fi
 
 echo "==> starting components"
 : > "$PID_FILE"
@@ -216,9 +210,10 @@ start sequencer   "$BIN/miden-node" sequencer --rpc.listen "$RPC" --data-directo
     --disable-account-allowlist \
     --block.interval 3s --batch.interval 1s
 # A network transaction's proof runs well past the prover's 60s default on a shared CI runner, and
-# the default capacity of 1 rejects the ntx-builder's retry outright, so it never converges.
+# the default capacity of 1 rejects the ntx-builder's retry outright, so it never converges. The
+# funding service proves against this prover too, so the capacity covers both callers.
 start prover      "$BIN/miden-remote-prover" --kind=transaction --port="$PROVER_PORT" \
-    --timeout "$PROVER_TIMEOUT" --capacity 8
+    --timeout "$PROVER_TIMEOUT" --capacity 16
 # Let the sequencer bind its RPC before the ntx-builder dials it.
 sleep 2
 # The ntx-builder's own default of 10s is shorter than the heaviest proofs take on CI, so it is
@@ -228,6 +223,27 @@ start ntx-builder "$BIN/miden-ntx-builder" start --listen "$NTX" --rpc.url "http
     --tx-prover.timeout "$PROVER_TIMEOUT" \
     --max-cycles "$((1 << 18))" \
     --data-directory "$DATA/ntx-builder"
+
+# The funding service hands the native asset to the accounts the tests create. It exists only on a
+# fee-charging chain, since a fee-free one hands out nothing and its genesis declares no wallet for
+# the service to pay from.
+#
+# It signs with the key in the wallet `miden-validator genesis` wrote for the `funding_service`
+# entry, and trusts the same validator signing key the validator itself was started with. Requests
+# block until the note commits, so the HTTP timeout has to cover a proof plus the expiration
+# window.
+FUNDING_ENABLED=""
+if [ "$VERIFICATION_BASE_FEE" != "0" ]; then
+    FUNDING_ENABLED=1
+    start funding-service "$BIN/miden-funding-service" start --listen "$FUNDING" \
+        --rpc.url "http://$RPC" \
+        --tx-prover.url "http://$PROVER" \
+        --tx-prover.timeout "$PROVER_TIMEOUT" \
+        --account-file "$DATA/accounts/funding_service.mac" \
+        --validator-signing-public-key "$VALIDATOR_PUBLIC_KEY" \
+        --http.timeout 300s \
+        --poll-interval 250ms
+fi
 
 # Returns non-zero (with a message) if any started component is no longer running.
 check_components_alive() {
@@ -240,21 +256,33 @@ check_components_alive() {
     done < "$PID_FILE"
 }
 
-echo "==> waiting for RPC on $RPC"
-READY=""
-for _ in $(seq 1 60); do
-    if (exec 3<>"/dev/tcp/${RPC%:*}/${RPC##*:}") 2>/dev/null; then
-        exec 3>&- 3<&-
-        READY=1
-        break
-    fi
-    check_components_alive || exit 1
-    sleep 1
-done
-if [ -z "$READY" ]; then
-    echo "error: RPC did not become ready within 60s; see $LOG_DIR" >&2
+# Runs `probe` once a second until it succeeds, failing the run if it never does or if a component
+# dies while waiting.
+wait_for() {
+    local what="$1" probe="$2"
+    echo "==> waiting for $what"
+    for _ in $(seq 1 60); do
+        "$probe" && return 0
+        check_components_alive || exit 1
+        sleep 1
+    done
+    echo "error: $what did not become ready within 60s; see $LOG_DIR" >&2
     exit 1
+}
+
+rpc_ready() { (exec 3<>"/dev/tcp/${RPC%:*}/${RPC##*:}") 2>/dev/null && exec 3>&- 3<&-; }
+# `GET /status` answers while the service still synchronizes, so this only confirms it is serving.
+# Asking for the route rather than the socket catches a process that bound the port but cannot
+# serve, which is what a funding account the node does not agree with looks like.
+funding_ready() { curl -sfo /dev/null "http://$FUNDING/status"; }
+
+wait_for "RPC on $RPC" rpc_ready
+
+if [ -n "$FUNDING_ENABLED" ]; then
+    wait_for "the funding service on $FUNDING" funding_ready
+    echo "==> funding service is up (MIDEN_FUNDING_SERVICE_URL=http://$FUNDING)"
 fi
+
 echo "==> node is up (RPC on http://$RPC); logs in $LOG_DIR"
 
 if [ "$MODE" = "background" ]; then

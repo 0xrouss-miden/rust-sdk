@@ -24,11 +24,6 @@ pub trait FeeFunder: Send + Sync + fmt::Debug {
     /// Taken together so one transaction can pay them all; returned rather than consumed so each
     /// account's own next transaction spends its note.
     async fn fund(&self, account_ids: &[AccountId]) -> Result<Vec<(AccountId, Note)>>;
-
-    /// Waits until a block carries every payment this funder has submitted.
-    async fn flush(&self) -> Result<()> {
-        Ok(())
-    }
 }
 
 impl TestClient {
@@ -47,20 +42,13 @@ impl TestClient {
         Ok(())
     }
 
-    /// Waits until a block carries every payment this client's funder has submitted.
-    pub async fn flush_funder(&self) -> Result<()> {
-        match self.fee_funder() {
-            Some(funder) => funder.flush().await,
-            None => Ok(()),
-        }
-    }
-
     /// Returns the funder, or an error naming what to supply when the chain needs one.
     fn funder(&self) -> Result<Arc<dyn FeeFunder>> {
         self.fee_funder().cloned().context(
             "this chain charges a transaction fee, so every account a test creates has to be \
-             funded before it can transact, but this client has no fee funder. Supply the funder \
-             wallets to draw from (see the integration tests' `--funders` argument)",
+             funded before it can transact, but this client has no fee funder. Supply the \
+             funding service to draw from (see the integration tests' `--funding-service` \
+             argument)",
         )
     }
 

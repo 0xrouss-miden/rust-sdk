@@ -23,7 +23,7 @@ Writes, into `OUTPUT_DIR`:
 - `test_account_NNNN.mac`: the test faucets and the `too_many_assets` account (read-only
   fixtures, no secret keys).
 - `genesis.toml`: points at the native faucet via `native_faucet`, references the rest via
-  `[[account]]` entries, and declares the `verification_base_fee` and the funder wallets.
+  `[[account]]` entries, and declares the `verification_base_fee` and the funding wallet.
 
 The node is then bootstrapped with:
 
@@ -36,11 +36,11 @@ miden-validator bootstrap --genesis-config-file OUTPUT_DIR/genesis.toml ...
 Every transaction settles its fee out of the vault of the account it runs against, so the native
 faucet is generated here rather than by the node: its ID has to be known while the other accounts
 are built, or their vaults could not reference it. `MIDEN_VERIFICATION_BASE_FEE` overrides the base
-fee (`0` gives a fee-free chain) and `MIDEN_NUM_FUNDER_WALLETS` how many funders are declared.
+fee (`0` gives a fee-free chain, which declares no funding wallet).
 
-Seeded with the native asset: the `[[wallet]]` funders, which the node writes as
-`wallet_<index>.mac` and `start-test-node.sh` copies to `./data/funders/`, and every genesis account
-that transacts, which nothing can top up afterwards.
+Seeded with the native asset: the `[[wallet]]` entry named `funding_service`, which the node writes
+as `funding_service.mac` and the node's funding service pays out of, and every genesis account that
+transacts, which nothing can top up afterwards.
 
 ## AggLayer genesis
 
