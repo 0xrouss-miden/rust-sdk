@@ -1,10 +1,13 @@
 //! Draws the native fee asset from the node's funding service, which owns one account and hands out
 //! pay-to-ID notes over an HTTP API. It is the only source of that asset the suite has.
 //!
-//! The service answers a request only once the note is in a block, and it gathers every request
-//! that reaches it inside a short window into one transaction. A caller therefore asks for all of
-//! its accounts at once, so that they share that transaction, and so do the accounts of every other
-//! test process funding at the same moment.
+//! The service gathers every request that reaches it inside a short window into one transaction. A
+//! caller therefore asks for all of its accounts at once, so that they share that transaction, and
+//! so do the accounts of every other test process funding at the same moment.
+//!
+//! The requests do not wait for the note to commit. Every funding note is consumed as an
+//! unauthenticated input, so the transaction holding it only has to have reached the node, and
+//! waiting for a block would put a block interval on the critical path of each funded test.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -29,8 +32,10 @@ pub const FUNDING_SERVICE_ENV: &str = "MIDEN_FUNDING_SERVICE_URL";
 /// tens of thousands of base units, so this covers far more than any one test spends.
 const FUNDING_AMOUNT: u64 = 10_000_000;
 
-/// How long one request may take. The service waits for the note to commit before it answers, and
-/// its own `--http.timeout` defaults to five minutes, so this is set above that default.
+/// How long one request may take. The service answers as soon as the node holds the transaction,
+/// but it builds one transaction at a time and waits for each to commit before it builds the next,
+/// so a request can still wait out a proof and a preceding batch's block. Set above the
+/// `--http.timeout` the test node gives the service.
 ///
 /// This is a correctness bound, not only a courtesy. A caller that gives up is dropped from the
 /// service's next batch without an error on either side, so the account would silently never be
@@ -63,10 +68,16 @@ struct RequestFundsRequest {
     account_id: String,
     /// The amount of the native asset, in base units.
     amount: u64,
+    /// Whether the service answers only once the note is in a block.
+    ///
+    /// Always false here. The note is consumed as an unauthenticated input, so the answer is useful
+    /// as soon as the node holds the transaction which creates it.
+    wait_for_commit: bool,
 }
 
-/// The body of a successful funding response. The inclusion proof and the transaction the service
-/// also returns are not read: the note alone is what the funded account consumes.
+/// The body of a successful funding response. The transaction id the service also returns is not
+/// read, and it returns no inclusion proof for a request which does not wait, because the proof
+/// exists only once the note has committed. The note alone is what the funded account consumes.
 #[derive(Debug, Deserialize)]
 struct RequestFundsResponse {
     /// The serialized note, in hexadecimal.
@@ -150,12 +161,12 @@ impl FundingServiceFunder {
         })
     }
 
-    /// Asks for one note and waits for the service to commit it, retrying an attempt that left the
-    /// service's state untouched.
+    /// Asks for one note, retrying an attempt that left the service's state untouched.
     async fn request_note(&self, target: AccountId) -> Result<(AccountId, Note)> {
         let body = RequestFundsRequest {
             account_id: target.to_hex(),
             amount: self.amount,
+            wait_for_commit: false,
         };
 
         let mut attempt = 1;
@@ -214,8 +225,8 @@ impl FundingServiceFunder {
             return Err(Failure::from_status(status.as_u16(), message));
         }
 
-        // Past this point the note exists on chain, so a failure to read it is not something a
-        // retry fixes.
+        // Past this point the service has created the note, so a failure to read it is not
+        // something a retry fixes.
         decode_note(&payload).map_err(Failure::fatal)
     }
 }
@@ -247,8 +258,9 @@ impl FeeFunder for FundingServiceFunder {
         futures::future::try_join_all(requests).await
     }
 
-    // `flush` keeps its default: the service answers only once the note is committed, so there is
-    // nothing left in flight for the run to wait on.
+    // The run does not wait for the funding transactions to commit. Each funding note is consumed
+    // as an unauthenticated input by the transaction it pays for, which the node orders behind the
+    // one which creates it.
 }
 
 /// Returns the faucet the chain charges fees in, as the genesis header's protocol configuration

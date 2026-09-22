@@ -23,6 +23,11 @@ concurrency:
 env:
   CARGO_PROFILE_DEV_DEBUG: 0
   RUST_CACHE_KEY: rust-cache-2026.02.18
+  # TEMPORARY: the funding service only answers before its note commits from this revision onwards,
+  # which is what the integration tests ask it for. Remove this once a node release carries it.
+  # Every job which touches the test node needs it: the one which builds the binaries, and the ones
+  # which start them, because the started binaries are checked against the source resolved here.
+  MIDEN_NODE_GIT_REV: ee245792c4ed98f1852529b24788a96d73a48f0a
 
 jobs:
   test:
@@ -119,15 +124,17 @@ jobs:
           persist-credentials: false
       - name: Cleanup large tools for build space
         uses: ./.github/actions/cleanup-runner
-      - name: Resolve node revision
-        id: node-rev
-        run: echo "rev=$(./scripts/start-test-node.sh --print-rev)" >> "$GITHUB_OUTPUT"
+      # Names the node source and the set of binaries installed from it, so adding a binary misses
+      # a cache entry which does not hold it.
+      - name: Resolve node cache key
+        id: node-key
+        run: echo "key=$(./scripts/start-test-node.sh --print-rev)" >> "$GITHUB_OUTPUT"
       - name: Restore test node binaries
         id: cache-test-node
         uses: actions/cache/restore@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
         with:
           path: target/test-node/install
-          key: ${{ runner.os }}-test-node-${{ steps.node-rev.outputs.rev }}
+          key: ${{ runner.os }}-test-node-${{ steps.node-key.outputs.key }}
       # Build dir cached per node rev, with no cross-rev fallback: cargo reuses stale build-script
       # outputs when one target dir serves the same crate versions from two git revs, which breaks
       # the compile with phantom type errors. A rev bump therefore compiles from scratch.
@@ -137,7 +144,7 @@ jobs:
         uses: actions/cache/restore@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
         with:
           path: target/test-node/build
-          key: ${{ runner.os }}-test-node-build-${{ steps.node-rev.outputs.rev }}
+          key: ${{ runner.os }}-test-node-build-${{ steps.node-key.outputs.key }}
       - name: Install Rust
         if: steps.cache-test-node.outputs.cache-hit != 'true'
         run: rustup update --no-self-update
@@ -151,13 +158,13 @@ jobs:
         uses: actions/cache/save@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
         with:
           path: target/test-node/build
-          key: ${{ runner.os }}-test-node-build-${{ steps.node-rev.outputs.rev }}
+          key: ${{ runner.os }}-test-node-build-${{ steps.node-key.outputs.key }}
       - name: Save test node binaries
         if: steps.cache-test-node.outputs.cache-hit != 'true'
         uses: actions/cache/save@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
         with:
           path: target/test-node/install
-          key: ${{ runner.os }}-test-node-${{ steps.node-rev.outputs.rev }}
+          key: ${{ runner.os }}-test-node-${{ steps.node-key.outputs.key }}
       - name: Upload test node binaries
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:

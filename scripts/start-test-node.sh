@@ -8,10 +8,16 @@
 #   (no args)        start the node and stream its logs; Ctrl+C stops it
 #   --background     return once the node's RPC is ready, leaving it running (used by CI)
 #   --install-only   install the node binaries and exit (used by the CI build job)
-#   --print-rev      print the pinned node rev or version (CI cache key) and exit
+#   --print-rev      print the cache key naming the node binaries this script installs, and exit
 #
 # Env vars:
 #   MIDEN_VERIFICATION_BASE_FEE  genesis `verification_base_fee` (default 500; 0 disables fees)
+#   MIDEN_NODE_GIT_REV           install the node binaries from this git rev instead of the source
+#                                pinned in Cargo.lock. Give the full commit hash: `cargo install`
+#                                records that hash, and this script compares it to decide whether
+#                                the cached binaries are current.
+#   MIDEN_NODE_GIT_URL           repository MIDEN_NODE_GIT_REV names
+#                                (default https://github.com/0xMiden/miden-node)
 #
 # A fee-charging chain also starts the funding service, which is where the tests draw the native
 # asset from. They reach it at MIDEN_FUNDING_SERVICE_URL=http://127.0.0.1:50401.
@@ -58,10 +64,21 @@ VERIFICATION_BASE_FEE="${MIDEN_VERIFICATION_BASE_FEE:-500}"
 
 NODE_BINS=(miden-validator miden-node miden-ntx-builder miden-remote-prover miden-funding-service)
 
-# Resolve the pinned node source from Cargo.lock: a git pin takes precedence, otherwise use the
+# Resolve the node source. MIDEN_NODE_GIT_REV wins, so a node that is not released yet can be
+# tested without a git pin in Cargo.lock, which would drag the whole lockfile with it. Otherwise
+# read Cargo.lock: a git pin takes precedence there too, and a lockfile without one gives the
 # crates.io version locked for `miden-node-proto-build`.
-SRC_LINE="$(grep -m1 'source = "git+https://github.com/0xMiden/node' "$ROOT/Cargo.lock" || true)"
-if [ -n "$SRC_LINE" ]; then
+#
+# Cargo.lock records the URL as it is written in Cargo.toml. Both `0xMiden/node` and
+# `0xMiden/miden-node` reach the repository, so both spellings are matched. A pattern which matches
+# only one of them reports no git pin and silently installs the crates.io node instead.
+SRC_LINE="$(grep -m1 -E 'source = "git\+https://github\.com/0xMiden/(miden-)?node[?#"]' "$ROOT/Cargo.lock" || true)"
+if [ -n "${MIDEN_NODE_GIT_REV:-}" ]; then
+    NODE_SOURCE="git"
+    NODE_REV="$MIDEN_NODE_GIT_REV"
+    NODE_URL="${MIDEN_NODE_GIT_URL:-https://github.com/0xMiden/miden-node}"
+    NODE_DESC="$NODE_URL @ $NODE_REV (MIDEN_NODE_GIT_REV)"
+elif [ -n "$SRC_LINE" ]; then
     NODE_SOURCE="git"
     SRC="${SRC_LINE#*\"git+}"; SRC="${SRC%\"}"
     NODE_REV="${SRC##*#}"
@@ -71,15 +88,22 @@ else
     NODE_SOURCE="registry"
     NODE_VERSION="$(awk -F'"' '/^name = "miden-node-proto-build"$/ { getline; print $2; exit }' "$ROOT/Cargo.lock")"
     [ -n "$NODE_VERSION" ] || {
-        echo "error: no 0xMiden/node git source and no miden-node-proto-build version in Cargo.lock" >&2
+        echo "error: no 0xMiden node git source and no miden-node-proto-build version in Cargo.lock" >&2
         exit 1
     }
     NODE_REV="v$NODE_VERSION"
     NODE_DESC="crates.io @ $NODE_VERSION"
 fi
 
+# What CI keys its cache of the installed binaries on. It covers the set of binaries as well as the
+# source, because adding a binary to NODE_BINS leaves an existing cache entry a valid hit for a
+# source that has not moved, and that entry is missing the new binary. Every job which restores it
+# would then build that binary itself, and the entry is never refreshed because CI only saves on a
+# miss.
+NODE_CACHE_KEY="$NODE_REV-bins.$(printf '%s\n' "${NODE_BINS[@]}" | cksum | cut -d' ' -f1)"
+
 if [ "$MODE" = "print-rev" ]; then
-    echo "$NODE_REV"
+    echo "$NODE_CACHE_KEY"
     exit 0
 fi
 

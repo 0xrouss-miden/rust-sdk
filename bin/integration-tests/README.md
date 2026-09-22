@@ -123,11 +123,14 @@ TEST_MIDEN_NETWORK=testnet MIDEN_FUNDING_SERVICE_URL=https://funding.example \
   cargo nextest run --workspace --release --test=integration
 ```
 
-Two properties of the service a test can notice:
+Three properties of the service a test can notice:
 
-- It answers only once the note is in a block, so funding costs a test one commit wait. In exchange
-  the test process proves nothing itself, and every request that reaches the service inside one
+- The test process proves nothing itself, and every request that reaches the service inside one
   short window shares a single transaction, across processes.
+- The suite asks the service not to wait for the note to commit, so a request is answered as soon
+  as the node holds the transaction which creates the note. Every funding note is consumed as an
+  unauthenticated input, so a test never needs the block. A funding transaction which expires
+  before it commits therefore fails the transaction which consumes its note, and the test with it.
 - Its notes are **public**. A sync therefore imports a funding note as a tracked input note of the
   account it targets, so a test must identify a note by ID rather than by position or by counting
   the committed notes.
@@ -137,8 +140,8 @@ transaction first consumes that note, as described below. An account a test buil
 funded and deployed on the spot with `TestClient::deploy_account`, whose deploy transaction
 consumes the funding note and thereby settles its own fee.
 
-A funding request costs a commit wait, so accounts are funded in batches wherever a test creates
-more than one: the `setup_*` helpers create their accounts with the `insert_new_*_unfunded`
+The service builds one transaction at a time and waits for each to commit before it builds the
+next, so accounts are funded in batches wherever a test creates more than one: the `setup_*` helpers create their accounts with the `insert_new_*_unfunded`
 variants and then pass the whole set to `TestClient::fund_if_needed`, which asks for them all at
 once so they share one transaction. A test creating several accounts of its own should do the same
 rather than calling the funding `insert_new_*` helpers in a row.
